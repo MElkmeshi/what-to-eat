@@ -1,22 +1,32 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { addFood, cachedFoods, fetchFoods, PinError, removeFood, setPin } from './api'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import {
+  addFood, cachedFoods, fetchFoods, loadMissing, PinError, removeFood, saveMissing, setPin, updateFood, type Dish,
+} from './api'
 import { emojiFor } from './emoji'
 
 const RECENT_LIMIT = 4
 
-function pickRandom(items: string[], recent: string[]) {
-  const fresh = items.filter((i) => !recent.includes(i))
+function pickRandom(items: Dish[], recent: string[]) {
+  const fresh = items.filter((i) => !recent.includes(i.name))
   const pool = fresh.length ? fresh : items
   return pool[Math.floor(Math.random() * pool.length)]
 }
 
+// All ingredients across dishes, most used first.
+function allIngredients(dishes: Dish[]) {
+  const counts = new Map<string, number>()
+  for (const d of dishes) for (const i of d.ingredients) counts.set(i, (counts.get(i) ?? 0) + 1)
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'ar')).map(([i]) => i)
+}
+
 export default function App() {
-  const [items, setItems] = useState<string[]>(() => cachedFoods() ?? [])
+  const [items, setItems] = useState<Dish[]>(() => cachedFoods() ?? [])
   const [loading, setLoading] = useState(true)
   const [offline, setOffline] = useState(false)
-  const [pick, setPick] = useState<string | null>(null)
+  const [missing, setMissing] = useState<string[]>(loadMissing)
+  const [pick, setPick] = useState<Dish | null>(null)
   const [spinning, setSpinning] = useState(false)
-  const [sheetOpen, setSheetOpen] = useState(false)
+  const [sheet, setSheet] = useState<'list' | 'pantry' | null>(null)
   const recent = useRef<string[]>([])
   const timer = useRef<number | undefined>(undefined)
 
@@ -28,10 +38,21 @@ export default function App() {
     return () => window.clearTimeout(timer.current)
   }, [])
 
+  const ingredients = useMemo(() => allIngredients(items), [items])
+  // Forget missing ingredients that no dish uses any more.
+  const activeMissing = missing.filter((m) => ingredients.includes(m))
+  const available = items.filter((d) => !d.ingredients.some((i) => activeMissing.includes(i)))
+  const pickBlocked = pick && !available.some((d) => d.name === pick.name)
+
+  function updateMissing(next: string[]) {
+    setMissing(next)
+    saveMissing(next)
+  }
+
   function suggest() {
-    if (!items.length || spinning) return
-    const final = pickRandom(items, recent.current)
-    recent.current = [final, ...recent.current].slice(0, Math.min(RECENT_LIMIT, items.length - 1))
+    if (!available.length || spinning) return
+    const final = pickRandom(available, recent.current)
+    recent.current = [final.name, ...recent.current].slice(0, Math.min(RECENT_LIMIT, available.length - 1))
     setSpinning(true)
     navigator.vibrate?.(10)
 
@@ -46,11 +67,14 @@ export default function App() {
         navigator.vibrate?.([15, 40, 25])
         return
       }
-      setPick(items[Math.floor(Math.random() * items.length)])
+      setPick(available[Math.floor(Math.random() * available.length)])
       timer.current = window.setTimeout(tick, 40 + step * step * 1.6)
     }
     tick()
   }
+
+  const shown = pickBlocked && !spinning ? null : pick
+  const noneLeft = !loading && items.length > 0 && !available.length
 
   return (
     <div className="app">
@@ -62,51 +86,63 @@ export default function App() {
             {offline && ' · بدون اتصال'}
           </p>
         </div>
-        <button className="icon-btn" onClick={() => setSheetOpen(true)} aria-label="عدّل القائمة">
+        <button className="icon-btn" onClick={() => setSheet('list')} aria-label="عدّل القائمة">
           <ListIcon />
         </button>
       </header>
 
       <main className="stage">
-        <div className={`card ${spinning ? 'spinning' : ''} ${pick && !spinning ? 'landed' : ''}`}>
-          <div className="plate" aria-hidden>{pick ? emojiFor(pick) : '🍽️'}</div>
-          <p className="label">{pick ? (spinning ? '…' : 'اليوم ناكلو') : 'محتار؟'}</p>
-          <p className="pick" aria-live="polite">{pick ?? 'اضغط تحت وخلّيها علينا'}</p>
+        <div className={`card ${spinning ? 'spinning' : ''} ${shown && !spinning ? 'landed' : ''}`}>
+          <div className="plate" aria-hidden>{shown ? emojiFor(shown.name) : noneLeft ? '🤷' : '🍽️'}</div>
+          <p className="label">{shown ? (spinning ? '…' : 'اليوم ناكلو') : noneLeft ? 'مافيش أكلة تنفع' : 'محتار؟'}</p>
+          <p className="pick" aria-live="polite">
+            {shown?.name ?? (noneLeft ? 'كل الأكلات ناقصها حاجة، شيل شوية من الناقص' : 'اضغط تحت وخلّيها علينا')}
+          </p>
+          {shown && !spinning && shown.ingredients.length > 0 && (
+            <p className="ingredients-line">{shown.ingredients.join(' · ')}</p>
+          )}
         </div>
       </main>
 
       <footer className="actions">
-        <button className="primary" onClick={suggest} disabled={!items.length || spinning}>
-          {pick ? 'لا، غيره 🎲' : 'اقترح علي 🎲'}
+        <button className={`pantry-pill ${activeMissing.length ? 'active' : ''}`} onClick={() => setSheet('pantry')}>
+          {activeMissing.length ? (
+            <>
+              <span className="pill-text">🚫 بدون: {activeMissing.slice(0, 3).join('، ')}{activeMissing.length > 3 && ` +${activeMissing.length - 3}`}</span>
+              <span className="pill-count">{available.length} أكلة</span>
+            </>
+          ) : (
+            <span className="pill-text">🧺 ناقصك حاجة في الحوش؟</span>
+          )}
+        </button>
+        <button className="primary" onClick={suggest} disabled={!available.length || spinning}>
+          {shown ? 'لا، غيره 🎲' : 'اقترح علي 🎲'}
         </button>
       </footer>
 
-      {sheetOpen && (
-        <ListSheet items={items} offline={offline} onChange={setItems} onClose={() => setSheetOpen(false)} />
+      {sheet === 'pantry' && (
+        <PantrySheet
+          ingredients={ingredients}
+          missing={activeMissing}
+          availableCount={available.length}
+          onChange={updateMissing}
+          onClose={() => setSheet(null)}
+        />
+      )}
+      {sheet === 'list' && (
+        <ListSheet
+          items={items}
+          knownIngredients={ingredients}
+          offline={offline}
+          onChange={setItems}
+          onClose={() => setSheet(null)}
+        />
       )}
     </div>
   )
 }
 
-function ListSheet({
-  items,
-  offline,
-  onChange,
-  onClose,
-}: {
-  items: string[]
-  offline: boolean
-  onChange: (items: string[]) => void
-  onClose: () => void
-}) {
-  const [draft, setDraft] = useState('')
-  const [busy, setBusy] = useState<string | null>(null)
-  const [error, setError] = useState('')
-  const [needPin, setNeedPin] = useState(false)
-  const [pinDraft, setPinDraft] = useState('')
-  const [filter, setFilter] = useState('')
-  const retry = useRef<(() => Promise<void>) | null>(null)
-
+function Sheet({ title, badge, onClose, children }: { title: string; badge?: ReactNode; onClose: () => void; children: ReactNode }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
     window.addEventListener('keydown', onKey)
@@ -117,7 +153,76 @@ function ListSheet({
     }
   }, [onClose])
 
-  async function run(key: string, action: () => Promise<string[]>) {
+  return (
+    <div className="overlay" onClick={onClose}>
+      <section className="sheet" role="dialog" aria-modal aria-label={title} onClick={(e) => e.stopPropagation()}>
+        <div className="grabber" />
+        <div className="sheet-head">
+          <h2>{title} {badge}</h2>
+          <button className="text-btn" onClick={onClose}>تم</button>
+        </div>
+        {children}
+      </section>
+    </div>
+  )
+}
+
+function PantrySheet({
+  ingredients,
+  missing,
+  availableCount,
+  onChange,
+  onClose,
+}: {
+  ingredients: string[]
+  missing: string[]
+  availableCount: number
+  onChange: (missing: string[]) => void
+  onClose: () => void
+}) {
+  const toggle = (i: string) => onChange(missing.includes(i) ? missing.filter((m) => m !== i) : [...missing, i])
+
+  return (
+    <Sheet title="شن ناقص في الحوش؟" badge={<span className="count">{availableCount} أكلة</span>} onClose={onClose}>
+      <p className="muted">اختار اللي مش موجود عندك، ونقترحولك أكلات بدونه.</p>
+      <div className="chips scroll">
+        {ingredients.map((i) => (
+          <button key={i} className={`chip ${missing.includes(i) ? 'off' : ''}`} aria-pressed={missing.includes(i)} onClick={() => toggle(i)}>
+            {i}
+          </button>
+        ))}
+        {!ingredients.length && <p className="muted">ما فيش مكونات مسجلة للأكلات بعد. زيدها من القائمة.</p>}
+      </div>
+      {missing.length > 0 && (
+        <button className="text-btn reset" onClick={() => onChange([])}>كل شي موجود، امسح الاختيار</button>
+      )}
+    </Sheet>
+  )
+}
+
+function ListSheet({
+  items,
+  knownIngredients,
+  offline,
+  onChange,
+  onClose,
+}: {
+  items: Dish[]
+  knownIngredients: string[]
+  offline: boolean
+  onChange: (items: Dish[]) => void
+  onClose: () => void
+}) {
+  const [draft, setDraft] = useState('')
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState('')
+  const [needPin, setNeedPin] = useState(false)
+  const [pinDraft, setPinDraft] = useState('')
+  const [filter, setFilter] = useState('')
+  const [open, setOpen] = useState<string | null>(null)
+  const retry = useRef<(() => Promise<void>) | null>(null)
+
+  async function run(key: string, action: () => Promise<Dish[]>) {
     setBusy(key)
     setError('')
     try {
@@ -140,11 +245,15 @@ function ListSheet({
     e.preventDefault()
     const name = draft.trim()
     if (!name) return
-    if (items.includes(name)) {
+    if (items.some((d) => d.name === name)) {
       setError('موجودة في القائمة')
       return
     }
-    if (await run('__add', () => addFood(name))) setDraft('')
+    if (await run('__add', () => addFood(name))) {
+      setDraft('')
+      setFilter('')
+      setOpen(name) // straight into adding its ingredients
+    }
   }
 
   async function submitPin(e: FormEvent) {
@@ -155,69 +264,127 @@ function ListSheet({
     await retry.current?.()
   }
 
-  const shown = filter ? items.filter((i) => i.includes(filter.trim())) : items
+  const shown = filter ? items.filter((d) => d.name.includes(filter.trim()) || d.ingredients.some((i) => i.includes(filter.trim()))) : items
 
   return (
-    <div className="overlay" onClick={onClose}>
-      <section className="sheet" role="dialog" aria-modal aria-label="القائمة" onClick={(e) => e.stopPropagation()}>
-        <div className="grabber" />
-        <div className="sheet-head">
-          <h2>القائمة <span className="count">{items.length}</span></h2>
-          <button className="text-btn" onClick={onClose}>تم</button>
-        </div>
+    <Sheet title="القائمة" badge={<span className="count">{items.length}</span>} onClose={onClose}>
+      {offline && <p className="note">مافيش اتصال بالسيرفر، القائمة للعرض فقط.</p>}
 
-        {offline && <p className="note">مافيش اتصال بالسيرفر، القائمة للعرض فقط.</p>}
+      {needPin ? (
+        <form className="add" onSubmit={submitPin}>
+          <input
+            autoFocus
+            type="password"
+            inputMode="numeric"
+            placeholder="الرمز السري للتعديل"
+            value={pinDraft}
+            onChange={(e) => setPinDraft(e.target.value)}
+          />
+          <button className="primary small" disabled={!pinDraft.trim()}>تأكيد</button>
+        </form>
+      ) : (
+        <form className="add" onSubmit={submit}>
+          <input
+            placeholder="أضف أكلة… مثلاً: بازين"
+            value={draft}
+            maxLength={60}
+            enterKeyHint="done"
+            onChange={(e) => { setDraft(e.target.value); setError('') }}
+            disabled={offline}
+          />
+          <button className="primary small" disabled={!draft.trim() || busy === '__add' || offline}>
+            {busy === '__add' ? '…' : 'أضف'}
+          </button>
+        </form>
+      )}
+      {error && <p className="error">{error}</p>}
 
-        {needPin ? (
-          <form className="add" onSubmit={submitPin}>
-            <input
-              autoFocus
-              type="password"
-              inputMode="numeric"
-              placeholder="الرمز السري للتعديل"
-              value={pinDraft}
-              onChange={(e) => setPinDraft(e.target.value)}
-            />
-            <button className="primary small" disabled={!pinDraft.trim()}>تأكيد</button>
-          </form>
-        ) : (
-          <form className="add" onSubmit={submit}>
-            <input
-              placeholder="أضف أكلة… مثلاً: بازين"
-              value={draft}
-              maxLength={60}
-              enterKeyHint="done"
-              onChange={(e) => { setDraft(e.target.value); setError('') }}
-              disabled={offline}
-            />
-            <button className="primary small" disabled={!draft.trim() || busy === '__add' || offline}>
-              {busy === '__add' ? '…' : 'أضف'}
-            </button>
-          </form>
-        )}
-        {error && <p className="error">{error}</p>}
+      {items.length > 8 && (
+        <input className="search" type="search" placeholder="ابحث بالأكلة أو المكون" value={filter} onChange={(e) => setFilter(e.target.value)} />
+      )}
 
-        {items.length > 8 && (
-          <input className="search" type="search" placeholder="ابحث" value={filter} onChange={(e) => setFilter(e.target.value)} />
-        )}
-
-        <ul className="items">
-          {shown.map((item) => (
-            <li key={item} className={busy === item ? 'removing' : ''}>
-              <span><span className="item-emoji" aria-hidden>{emojiFor(item)}</span>{item}</span>
+      <ul className="items">
+        {shown.map((dish) => (
+          <li key={dish.name} className={busy === dish.name ? 'removing' : ''}>
+            <div className="row">
+              <button className="row-main" aria-expanded={open === dish.name} onClick={() => setOpen(open === dish.name ? null : dish.name)}>
+                <span className="item-emoji" aria-hidden>{emojiFor(dish.name)}</span>
+                <span className="row-text">
+                  <span className="row-name">{dish.name}</span>
+                  <span className="row-sub">{dish.ingredients.length ? dish.ingredients.join('، ') : 'بدون مكونات — اضغط وزيد'}</span>
+                </span>
+              </button>
               <button
                 className="remove"
-                aria-label={`احذف ${item}`}
+                aria-label={`احذف ${dish.name}`}
                 disabled={!!busy || offline}
-                onClick={() => run(item, () => removeFood(item))}
+                onClick={() => run(dish.name, () => removeFood(dish.name))}
               >
                 ×
               </button>
-            </li>
-          ))}
-          {!shown.length && <li className="empty">{filter ? 'مافيش نتائج' : 'القائمة فاضية، أضف أول أكلة'}</li>}
-        </ul>
-      </section>
+            </div>
+            {open === dish.name && (
+              <IngredientEditor
+                dish={dish}
+                known={knownIngredients}
+                disabled={offline || !!busy}
+                onSave={(ingredients) => run(dish.name, () => updateFood(dish.name, ingredients))}
+              />
+            )}
+          </li>
+        ))}
+        {!shown.length && <li className="empty">{filter ? 'مافيش نتائج' : 'القائمة فاضية، أضف أول أكلة'}</li>}
+      </ul>
+    </Sheet>
+  )
+}
+
+function IngredientEditor({
+  dish,
+  known,
+  disabled,
+  onSave,
+}: {
+  dish: Dish
+  known: string[]
+  disabled: boolean
+  onSave: (ingredients: string[]) => Promise<boolean>
+}) {
+  const [draft, setDraft] = useState('')
+
+  async function add(e: FormEvent) {
+    e.preventDefault()
+    const name = draft.trim()
+    if (!name || dish.ingredients.includes(name)) return setDraft('')
+    if (await onSave([...dish.ingredients, name])) setDraft('')
+  }
+
+  const listId = `ing-${dish.name}`
+  return (
+    <div className="editor">
+      <div className="chips">
+        {dish.ingredients.map((i) => (
+          <span key={i} className="chip static">
+            {i}
+            <button aria-label={`شيل ${i}`} disabled={disabled} onClick={() => onSave(dish.ingredients.filter((x) => x !== i))}>×</button>
+          </span>
+        ))}
+      </div>
+      <form className="add" onSubmit={add}>
+        <input
+          list={listId}
+          placeholder="زيد مكون… مثلاً: دجاج"
+          value={draft}
+          maxLength={30}
+          enterKeyHint="done"
+          onChange={(e) => setDraft(e.target.value)}
+          disabled={disabled}
+        />
+        <datalist id={listId}>
+          {known.filter((k) => !dish.ingredients.includes(k)).map((k) => <option key={k} value={k} />)}
+        </datalist>
+        <button className="primary small" disabled={!draft.trim() || disabled}>زيد</button>
+      </form>
     </div>
   )
 }

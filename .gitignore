@@ -25,3 +25,8 @@ dist-ssr
 .vercel
 .env*.local
 .env*
+
+# Vercel/Upstash agent skills (local only)
+.agents
+.claude
+skills-lock.json

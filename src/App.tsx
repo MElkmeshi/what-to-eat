@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { addFood, cachedFoods, fetchFoods, PinError, removeFood, setPin } from './api'
+import { emojiFor } from './emoji'
 
-const EMOJIS = ['🍲', '🍝', '🍕', '🥘', '🍛', '🌯', '🍔', '🥙', '🍗', '🫕']
 const RECENT_LIMIT = 4
 
 function pickRandom(items: string[], recent: string[]) {
@@ -16,7 +16,6 @@ export default function App() {
   const [offline, setOffline] = useState(false)
   const [pick, setPick] = useState<string | null>(null)
   const [spinning, setSpinning] = useState(false)
-  const [emoji, setEmoji] = useState(EMOJIS[0])
   const [sheetOpen, setSheetOpen] = useState(false)
   const recent = useRef<string[]>([])
   const timer = useRef<number | undefined>(undefined)
@@ -43,7 +42,6 @@ export default function App() {
       step++
       if (step >= steps) {
         setPick(final)
-        setEmoji(EMOJIS[Math.floor(Math.random() * EMOJIS.length)])
         setSpinning(false)
         navigator.vibrate?.([15, 40, 25])
         return
@@ -71,7 +69,7 @@ export default function App() {
 
       <main className="stage">
         <div className={`card ${spinning ? 'spinning' : ''} ${pick && !spinning ? 'landed' : ''}`}>
-          <div className="plate" aria-hidden>{pick ? emoji : '🍽️'}</div>
+          <div className="plate" aria-hidden>{pick ? emojiFor(pick) : '🍽️'}</div>
           <p className="label">{pick ? (spinning ? '…' : 'اليوم ناكلو') : 'محتار؟'}</p>
           <p className="pick" aria-live="polite">{pick ?? 'اضغط تحت وخلّيها علينا'}</p>
         </div>
@@ -206,7 +204,7 @@ function ListSheet({
         <ul className="items">
           {shown.map((item) => (
             <li key={item} className={busy === item ? 'removing' : ''}>
-              <span>{item}</span>
+              <span><span className="item-emoji" aria-hidden>{emojiFor(item)}</span>{item}</span>
               <button
                 className="remove"
                 aria-label={`احذف ${item}`}
